@@ -57,7 +57,16 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	votedFor    int
+	// log         []Entry
 
+	commitIndex int
+	lastApplied int
+	nextIndex   []int
+	matchIndex  []int
+
+	role int
 }
 
 // return currentTerm and whether this server
@@ -96,17 +105,41 @@ func (rf *Raft) readPersist(data []byte) {
 
 // example RequestVote RPC arguments structure.
 type RequestVoteArgs struct {
-	// Your data here.
+	term         int
+	candidateId  int
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 type RequestVoteReply struct {
-	// Your data here.
+	term        int
+	voteGranted bool
+}
+
+type AppendEntriesArgs struct {
+	term         int
+	leaderId     int
+	prevLogIndex int
+	prevLogTerm  int
+	// entries      []Entry
+	leaderCommit int
+}
+
+type AppendEntriesReply struct {
+	term    int
+	success bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.term = rf.currentTerm
+	reply.voteGranted = false
+	if args.term < rf.currentTerm {
+		return
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
