@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 	"sort"
+	"bytes"
+	"encoding/gob"
 )
 
 // import "bytes"
@@ -108,22 +110,24 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here.
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here.
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 type RequestVoteArgs struct {
@@ -168,7 +172,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("Node %v Term %v refused to vote for Node %v Term %v", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		return
 	}
+
 	
+	doPersist := false
+
 	if args.Term > rf.currentTerm {
 		if rf.role != FOLLOWER {
 			DPrintf("Node %v has become a follower with term %v!", rf.me, args.Term)
@@ -176,6 +183,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		doPersist = true
 	}
 	
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
@@ -184,15 +192,22 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
+			doPersist = true
 		}
 	}
 	
+	if doPersist {
+		rf.persist()
+	}
+
 	if (rf.votedFor == args.CandidateId) {
 		rf.resetElectionTimer()
 		DPrintf("Node %v Term %v voted for Node %v Term %v", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 	} else {
 		DPrintf("Node %v Term %v refused to vote for Node %v Term %v", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 	}
+
+
 }
 
 func (rf *Raft) debugLog() {
@@ -203,16 +218,24 @@ func (rf *Raft) debugLog() {
 		}
 		DPrintf("Index %v: [%v]", i, rf.log[i])
 	}
+	DPrintf("Node %v now has log of length %v and Term %v", rf.me, len(rf.log), rf.currentTerm)
+
 }
 
 // Append Entries RPC handler.
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO: phase 2B
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	
 	DPrintf("Node %v Term %v receives a heartbeat from Node %v Term %v", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	
+	doPersist := false
+	defer func() {
+		if doPersist {
+			rf.persist()
+		}
+	}()
+
 	// 1. reply false if term < currentTerm 
 	if args.Term < rf.currentTerm {
 		reply.Term, reply.Success = rf.currentTerm, false
@@ -221,6 +244,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.votedFor = args.Term, -1
+		doPersist = true
 	}
 
 	if rf.role != FOLLOWER {
@@ -247,6 +271,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	
 	// 4. Append any new entries not already in the log
 	rf.log = append(rf.log[:args.PrevLogIndex + 1], args.Entries...)
+	doPersist = true
 
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
@@ -281,7 +306,6 @@ func (rf *Raft) getRequestVoteArgs() RequestVoteArgs {
 	args := RequestVoteArgs {
 		Term : rf.currentTerm,
 		CandidateId : rf.me,
-		// TODO: phase 2B
 		LastLogIndex: rf.getLastLogIndex(),
 		LastLogTerm : rf.getLastLogTerm(),
 	}
@@ -311,7 +335,7 @@ func (rf *Raft) becomeLeader() {
 
 	rf.nextIndex[rf.me] = nlog - 1
 
-	// rf.persist()
+	rf.persist()
 
 }
 
@@ -321,6 +345,8 @@ func (rf *Raft) startElection() {
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 	rf.resetElectionTimer()
+
+	rf.persist()
 
 	DPrintf("Node %v has become a candidate with term %v!", rf.me, rf.currentTerm)
 
@@ -429,6 +455,7 @@ func (rf *Raft) sendAppendEntriesToPeer(peer int) {
 		if reply.Term > rf.currentTerm { 
 			rf.role = FOLLOWER
 			rf.currentTerm = reply.Term
+			rf.persist()
 			rf.resetElectionTimer()
 			return 
 		}
@@ -588,10 +615,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, LogEntry{Term: term, Command: command})
 	rf.persist()
 	DPrintf("Client sended a new command %v to Leader %v", command, rf.me)
-	for l := 1; l <= index; {
-		DPrintf("[Index %v, Log %v]", l, rf.log[l])
-		l += 1
-	}
+	rf.debugLog()
 
 	return index, term, true
 }
@@ -638,7 +662,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize timer
 	rf.electionTimer = time.NewTimer(getRandElectionTimeout())
-	rf.heartbeatTimer = time.NewTimer(HEARTBEAT_INTERVAL * time.Millisecond)
+	rf.heartbeatTimer = time.NewTimer(getHeartbeatTimeout())
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
