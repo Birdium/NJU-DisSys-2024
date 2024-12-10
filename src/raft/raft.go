@@ -339,6 +339,44 @@ func (rf *Raft) becomeLeader() {
 
 }
 
+func (rf *Raft) collectVote(voteCh chan RequestVoteReply, npeer int) {
+	voteTot := 1
+	voteCnt := 1
+
+	// loop that counts the result
+	for {
+		vote := <-voteCh
+		voteTot += 1
+		if vote.VoteGranted {
+			voteCnt += 1
+		} else {
+			rf.mu.Lock()
+			if rf.role != CANDIDATE {
+				rf.mu.Unlock()
+				break
+			}
+			if vote.Term > rf.currentTerm {
+				rf.currentTerm = vote.Term
+				rf.role = FOLLOWER
+				rf.votedFor = -1
+				rf.persist()
+				rf.resetElectionTimer()
+				voteCnt = 0
+				rf.mu.Unlock()
+				break
+			}
+			rf.mu.Unlock()
+		}
+		if voteTot == npeer || voteCnt > npeer/2 || voteTot-voteCnt > npeer/2 {
+			break
+		}
+	}
+
+	if voteCnt > npeer/2 {
+		rf.becomeLeader()
+	}
+}
+
 // This func is called when rf.mu is held by the caller
 func (rf *Raft) startElection() {
 	rf.role = CANDIDATE
@@ -354,7 +392,7 @@ func (rf *Raft) startElection() {
 
 	npeer := len(rf.peers)
 
-	voteCh := make(chan bool, npeer)
+	voteCh := make(chan RequestVoteReply, npeer)
 
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -364,40 +402,17 @@ func (rf *Raft) startElection() {
 		// vote result will be transferred via channel voteCh 
 		go func(peer int) {
 			reply := RequestVoteReply{}
-			ok := rf.sendRequestVote(peer, args, &reply)
-			if ok {
-				voteCh <- reply.VoteGranted
-			} else {
-				voteCh <- false
-			}
+			rf.sendRequestVote(peer, args, &reply)
+			voteCh <- reply
 		} (peer)
 	}
 
-	go func() {
-		voteTot := 1
-		voteCnt := 1
-	
-		// loop that counts the result
-		for {
-			vote := <-voteCh
-			voteTot += 1
-			if vote {
-				voteCnt += 1
-			}
-			if voteTot == npeer || voteCnt > npeer/2 || voteTot-voteCnt > npeer/2 {
-				break
-			}
-		}
-	
-		if voteCnt > npeer/2 {
-			rf.becomeLeader()
-		}
-	}()
+	go rf.collectVote(voteCh, npeer)
 }
 
-func (rf *Raft) getAppendLogs(slave int) (prevLogIndex int, prevLogTerm int, entries []LogEntry) {
+func (rf *Raft) getAppendLogs(peer int) (prevLogIndex int, prevLogTerm int, entries []LogEntry) {
 
-	nextIndex := rf.nextIndex[slave]
+	nextIndex := rf.nextIndex[peer]
 	lastLogIndex, lastLogTerm := rf.getLastLogIndexTerm()
 
 	if nextIndex <= 0 || nextIndex > lastLogIndex { // heartbeat only
@@ -416,8 +431,8 @@ func (rf *Raft) getAppendLogs(slave int) (prevLogIndex int, prevLogTerm int, ent
 	return
 }
 
-func (rf *Raft) getAppendEntriesArgs(slave int) AppendEntriesArgs {
-	prevLogIndex, preLogTerm, entries := rf.getAppendLogs(slave)
+func (rf *Raft) getAppendEntriesArgs(peer int) AppendEntriesArgs {
+	prevLogIndex, preLogTerm, entries := rf.getAppendLogs(peer)
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
